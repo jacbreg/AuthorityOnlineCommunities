@@ -152,7 +152,7 @@ relevant_columns = ['rep_cum','lambda_up','lambda_down','avail','AnswerNum', 'Se
 choice_tupl2num = pd.read_pickle(directory2 + 'choice2num_week.pkl')
 choices = list(choice_tupl2num.keys())
 
-### ESTIMATION
+### ESTIMATION - STEP 1: VARIABLE CONSTRUCTION
 # for each possible choice, construct separate versions of the data with the future expected value of states
 # but only for states that enter in the utility function
 for t in range(1,4):
@@ -161,7 +161,52 @@ for t in range(1,4):
                   EDV, tau_up, tau_down, rateavail,prob_acceptance, uppoints, downpoints, approvalpoints,
                   Tgrad, Tbeta, TTdesigned, TTbeta, CCPS['t{}'.format(t)], SCALERS['t{}'.format(t)], choice_tupl2num,
                   t, out_dir)
+    
+### ESTIMATION - STEP 2: MAXIMUM LIKELIHOOD
+# ---- Stata
+VARS = ['R','CA','CE','Tcum','isEditor','RxE','CAxE','CExE']
 
+for t in range(1,4):
+    datatouse = hist.loc[hist['user_types']==t]
+    alldfs = []
+    for choice in choices:
+        choicedf = pd.DataFrame()
+        choicestr = '%f_%f_%f'%choice
+        datachoice = pd.read_csv(out_dir + 'states_{}_wsparse_week_type{}.csv'.format(choicestr,t), index_col=0)
+        datachoice.reset_index(inplace=True)
+        
+        cv = [i for i in datachoice.columns if re.search('R[0-9]',i)] # just for num of periods
+        periods = np.arange(len(cv))
+        deltas = delta ** periods
+        deltas = np.tile(deltas, (len(datachoice),1))
+        
+        for var in VARS:
+            cv = [i for i in datachoice.columns if re.search('{}[0-9]'.format(var),i)]
+    
+            var_data = np.sum(datachoice.loc[:,cv].values * deltas, axis=1)
+            choicedf.loc[:,var] = var_data
+            
+        ccpv = [i for i in datachoice.columns if i.startswith('ccp')]
+        ccpv_data = np.sum(datachoice.loc[:,ccpv].values * deltas[:,1:], axis=1)
+        choicedf.loc[:,'ccp'] = ccpv_data
+        
+        choicedf.loc[:,'choicenum'] = choice_tupl2num[choice]
+        choicedf.loc[:,'user'] = datachoice['user']
+        choicedf.loc[:,'periods'] = datachoice['periods']
+        choicedf.loc[:,'observations'] = datachoice.index
+        
+        choicedf = pd.merge(choicedf, datatouse, on=['user','periods'], validate='1:1', how='outer', indicator='merge')
+        if any(choicedf['merge']!='both'):
+            print('merge mismatch')
+            break
+    
+        alldfs.append(choicedf)
+    
+    findata = pd.concat(alldfs)
+    findata.reset_index(inplace=True, drop=True)
+    findata.to_stata(out_dir + 'dfSTATA_week_type{}.dta'.format(t), write_index=False)
+
+# ---- Python
 
 ### load all dfs constructed and sort original data
 alldfs = {}
@@ -170,36 +215,13 @@ for choice in choices:
     datachoice = pd.read_csv(out_dir + 'states_%s_wsparse_week.csv'%(choicestr), index_col=0)
     datachoice = datachoice.sort_values(by=['user','periods'])
     alldfs[choice] = datachoice
-hist = hist.sort_values(by=['user','periods'])
-
-## str to num
-#choice_str2num = {}
-#count =0
-#for choice in choices:
-#    choicestr = '%f_%f_%f'%choice
-#    choice_str2num[choicestr] = count
-#    count += 1
-
-# # temp scale vars (must be done before constructing the data)
-# for choice in choices:
-#     alldfs[choice].loc[:,'AltrA0'] =  alldfs[choice]['AltrA0'] / 100000
-#     alldfs[choice].loc[:,'AltrE0'] =  alldfs[choice]['AltrE0'] / 100000
-#     alldfs[choice].loc[:,'AltrAxE0'] =  alldfs[choice]['AltrAxE0'] / 100000
-#     alldfs[choice].loc[:,'AltrExE0'] =  alldfs[choice]['AltrExE0'] / 100000
-#     if 'AltrA1' in  alldfs[choice].columns:
-#         alldfs[choice].loc[:,'AltrA1'] =  alldfs[choice]['AltrA1'] / 100000
-#         alldfs[choice].loc[:,'AltrE1'] =  alldfs[choice]['AltrE1'] / 100000
-#         alldfs[choice].loc[:,'AltrAxE1'] =  alldfs[choice]['AltrAxE1'] / 100000
-#         alldfs[choice].loc[:,'AltrExE1'] =  alldfs[choice]['AltrExE1'] / 100000
-    
-
+hist = hist.sort_values(by=['user','periods'])    
     
 # first construct value function evaluation for each possible choice
 def estim(params, truedata, inputdata):
     diff_cvfs = pd.DataFrame()
     for choice in choices:
         param_vec = params
-        #choicestr = '%f_%f_%f'%choice
         choicenum = choice_tupl2num[choice]
         df = inputdata[choice]
     
@@ -231,21 +253,11 @@ def estim(params, truedata, inputdata):
 
         diff_cvfs.loc[:,choicenum] = np.matmul(df[vars_touse].values, param_vec) - summedccps
     
-    # x = np.abs(diff_cvfs).max().max()
-    # if x > 700:
-    #     print('adgustment of support')
-    #     if diff_cvfs.max().max() > 700:
-    #         diff_cvfs = diff_cvfs - (x - 700)
-    #     else:
-    #         diff_cvfs = diff_cvfs + (x - 700)
-    
     den = np.log(np.sum(np.exp(diff_cvfs), axis=1))
     diff_cvfs['truechoice'] = truedata['choicenum'].values
     diff_cvfs.set_index('truechoice', append=True, inplace=True)
     num = diff_cvfs.stack().reset_index(level=[-1,-2])
     num.rename(columns={'level_2':'choice',0:'num'}, inplace=True)
-    #num.loc[:,'choice'] = num['choice'].apply(lambda x: choice_str2num[x])
-    #num.loc[:,'truechoice'] = num['truechoice'].apply(lambda x: choice_tupl2num[x])
     num = num.loc[num['truechoice']==num['choice'],'num']
     
     outval = num - den
